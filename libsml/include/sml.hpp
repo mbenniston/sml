@@ -13,6 +13,14 @@
 namespace sml
 {
     /**
+     * @brief Represents the location of a symbol within some source file
+     */
+    struct Location
+    {
+        std::size_t column, line;
+    };
+
+    /**
      * @brief Represents a sml tag 
      * @remarks Contains child or content but not both
      */
@@ -22,6 +30,9 @@ namespace sml
         std::string content;
         std::vector<Node> children;
         std::map<std::string, std::string> attributes;
+
+        std::size_t contentOffset; // location with the parents tags content
+        Location location; // location from the source stream
     };
 
     /**
@@ -30,7 +41,10 @@ namespace sml
     class ParserError : public std::runtime_error
     {
     public:
-        ParserError(const std::string& msg) : std::runtime_error("Parser error: " + msg)
+        Location location;
+
+        ParserError(const std::string& msg, const Location& loc) : 
+            std::runtime_error("Parser error: " + msg + " at " + std::to_string(loc.line) + ":"  + std::to_string(loc.column)), location(loc)
         {
         }
     };
@@ -43,30 +57,27 @@ namespace sml
     private:
         enum class State
         { 
-            NULL_STATE, 
-            NAME_STATE, 
-            TAG_WHITESPACE, 
-            TAG_ATTRIB_NAME,
-            TAG_ATTRIB_EQUALS,
-            TAG_ATTRIB_VALUE,
-            
-            TAG_CLOSE_NAME
+            START, // state before parsing a tag
+            NAME, // tag name
+            WHITESPACE, // seperators between attribs
+            ATTRIB_NAME, // attrib=
+            ATTRIB_EQUALS, // before equals
+            ATTRIB_EQUALS_SEEN, // after equals
+            ATTRIB_VALUE, // "value"
+            CLOSE_NAME, // close tag
+            SINGLETON // open tag closed with prefixed '/'
         };
 
-        enum class CharacterOperation
+        enum class CharOp
         {
-            RECYCLE_CHAR,
-            CONSUME_CHAR
+            DEFER,
+            CONSUME
         };
 
-        struct StateTransition
+        struct StateChange
         {
-            CharacterOperation charOp;
-            State newState;
-
-            StateTransition(CharacterOperation op, State nState) : charOp(op), newState(nState)
-            {
-            }
+            CharOp op;
+            State nextState;
         };
 
         std::stack<Node> m_nodeStack;
@@ -76,16 +87,21 @@ namespace sml
 
         bool m_equalsSeen = false;
         bool m_terminalTag = false;
+        bool m_rootClosed = false;
 
-        StateTransition nullStateHandleChar(char c);
-        StateTransition nameStateHandleChar(char c);
-        StateTransition tagWhitespaceStateHandleChar(char c);
-        StateTransition tagAttribNameHandleChar(char c);
-        StateTransition tagAttribEqualsHandleChar(char c);
-        StateTransition tagAttribValueHandleChar(char c);
-        StateTransition tagCloseHandleChar(char c);
+        StateChange start(char c);
+        StateChange name(char c);
+        StateChange whitespace(char c);
+        StateChange attrib_name(char c);
+        StateChange attrib_equals(char c);
+        StateChange attrib_equals_seen(char c);
+        StateChange attrib_value(char c);
+        StateChange close_name(char c);
+        StateChange singleton(char c);
 
-        State m_currentState = State::NULL_STATE;
+        State m_currentState = State::START;
+
+        Location m_currentLocation = Location{ 1, 1 };
 
     public:
         /**

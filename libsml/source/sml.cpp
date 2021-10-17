@@ -1,236 +1,292 @@
 #include "../include/sml.hpp"
-#include <iostream>
 #include <iterator>
 #include <sstream>
 
 namespace sml
 {
-    // remove newlines and pre and post whitespace from 'raw'
-    static void stripForContent(std::string& raw)
+    //remove newlines and pre and post whitespace from 'raw'
+    static std::pair<std::size_t, std::size_t> stripForContent(std::string& raw)
     {
+        std::size_t numRemovedFromLeft = raw.size();
+
         raw.erase(raw.begin(), std::find_if(raw.begin(), raw.end(), 
             [](char ch) { return !std::isspace(ch); }));
+        numRemovedFromLeft = numRemovedFromLeft - raw.size();
+
+        std::size_t numRemovedFromRight = raw.size();
 
         raw.erase(std::find_if(raw.rbegin(), raw.rend(), 
             [](char ch) { return !std::isspace(ch);}).base(), raw.end());
+        numRemovedFromRight = numRemovedFromRight - raw.size();
 
-        raw.erase(std::remove(raw.begin(), raw.end(), '\n'),
-            raw.end());
-
-        raw.erase(std::remove(raw.begin(), raw.end(), '\t'),
-            raw.end());
+        return { numRemovedFromLeft, numRemovedFromRight };
     }
 
-    static constexpr bool isValidNameCharacter(char c)
+    static void stripNode(Node& node)
+    {
+        // strip content
+        auto numRemoved = stripForContent(node.content);
+        for(Node& child : node.children)
+        {
+            child.contentOffset -= numRemoved.first;
+
+            if(child.contentOffset >= node.content.size())
+            {
+                child.contentOffset = node.content.size() - 1;
+            }
+        }
+    }
+
+    static constexpr bool isValidNameChar(char c)
     {
         return !std::isspace(c) && c != '<' && c != '>' && c != '=' && c != '/';
     }
 
-    Parser::StateTransition Parser::nullStateHandleChar(char c)
+    static constexpr bool isWhitespace(char c)
     {
-        if(c == '<')
+        return std::isspace(c);
+    }
+
+    static constexpr char OPEN_TAG = '<';
+    static constexpr char TAG_END = '>';
+    static constexpr char CLOSE_TAG_PREFIX = '/';
+    static constexpr char ATTRIB_EQUALS = '=';
+    static constexpr char ATTRIB_VALUE_WRAP = '"';
+
+    Parser::StateChange Parser::start(char c)
+    {
+        if(c == OPEN_TAG)
         {
+            if(m_rootClosed)
+            {
+                throw ParserError("opening new tag when the root tag has already been closed", 
+                    m_currentLocation);
+            }
+
+            // create new tag
+            // hook the tag into its parents content if it exists
+            std::size_t contentOffset = 0;
+            if(!m_nodeStack.empty())
+            {
+                contentOffset = m_nodeStack.top().content.size();
+            }
+            
             m_nodeStack.emplace();
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::NAME_STATE);
+            m_nodeStack.top().location = m_currentLocation;
+            m_nodeStack.top().contentOffset = contentOffset;
+
+            return StateChange{ CharOp::CONSUME, State::NAME };
+        }
+
+        // if there is a tag on the stack add to its content
+        if(m_rootClosed && !std::isspace(c))
+        {
+            throw ParserError("declaring content when the root tag has already been closed", 
+                m_currentLocation);
         }
 
         if(!m_nodeStack.empty())
         {
-            Node& topNode = m_nodeStack.top();
-            if(topNode.children.empty())
-            {
-                topNode.content.push_back(c);
-            }
-            else if(!topNode.content.empty())
-            {
-                topNode.content.clear();
-            }
+            m_nodeStack.top().content.push_back(c);
+        }
+        else
+        {
+            throw ParserError(std::string("expected root tag, got unexpected character: \"") + c + "\"", 
+                m_currentLocation);
         }
 
-        return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::NULL_STATE);
+        return StateChange{ CharOp::CONSUME, State::START };
     }
 
-    Parser::StateTransition Parser::nameStateHandleChar(char c)
+    Parser::StateChange Parser::name(char c)
     {
-        if(m_nodeStack.top().tagName.empty() && c == '/')
+        if(c == CLOSE_TAG_PREFIX)
         {
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_CLOSE_NAME);
+            if(m_nodeStack.top().tagName.empty())
+            {
+                return StateChange{ CharOp::CONSUME, State::CLOSE_NAME };
+            } 
+            else
+            {
+                // if the current name is not empty than the user is telling the parser to create a singleton
+                return StateChange{ CharOp::CONSUME, State::SINGLETON };
+            }
         }
 
-        if(isValidNameCharacter(c))
+        if(isValidNameChar(c))
         {
+            // build tag name
             m_nodeStack.top().tagName.push_back(c);
 
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::NAME_STATE);
+            return StateChange{ CharOp::CONSUME, State::NAME };
         }
-        
-        return StateTransition(CharacterOperation::RECYCLE_CHAR, Parser::State::TAG_WHITESPACE);
+
+        if(c == TAG_END)
+        {
+            return StateChange{ CharOp::DEFER, State::WHITESPACE };
+        }
+
+        if(isWhitespace(c))
+        {
+            return StateChange{ CharOp::CONSUME, State::WHITESPACE };
+        }
+
+        throw ParserError(std::string("expected tag name got unexpected character: \"") + c + "\"", 
+            m_currentLocation);
     }
 
-    Parser::StateTransition Parser::tagWhitespaceStateHandleChar(char c)
+    Parser::StateChange Parser::whitespace(char c)
     {
-        if(m_terminalTag && c != '>')
+        if(isWhitespace(c))
         {
-            throw ParserError("terminal tag symbol not follwed by then end of the tag");
+            return StateChange{ CharOp::CONSUME, State::WHITESPACE };
         }
 
-        if(std::isspace(c))
+        if(isValidNameChar(c))
         {
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_WHITESPACE);
+            return StateChange{ CharOp::DEFER, State::ATTRIB_NAME };
         }
 
-        if(isValidNameCharacter(c))
+        if(c == TAG_END)
         {
-            return StateTransition(CharacterOperation::RECYCLE_CHAR, Parser::State::TAG_ATTRIB_NAME);
+            // terminate the open tag
+            return StateChange{ CharOp::CONSUME, State::START };
         }
 
-        // tag end
-        if(c == '>')
+        if(c == CLOSE_TAG_PREFIX)
         {
-            if(m_terminalTag)
-            {
-                if(m_nodeStack.size() > 1)
-                {
-                    Node tag = std::move(m_nodeStack.top());
-
-                    if(!tag.children.empty() && !tag.content.empty())
-                    {
-                        tag.content.clear();
-                    }
-                    else
-                    {
-                        stripForContent(tag.content);
-                    }
-
-                    m_nodeStack.pop();
-                    m_nodeStack.top().children.push_back(std::move(tag));
-                }
-
-                m_terminalTag = false;
-            }
-
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::NULL_STATE);
+            return StateChange{ CharOp::CONSUME, State::SINGLETON };
         }
 
-        if(c == '/')
-        {
-            m_terminalTag = true;
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_WHITESPACE);
-        }
-
-        throw ParserError("unexpected character");
+        throw ParserError(std::string("expected attrib name got unexpected character: \"") + c + "\"", 
+            m_currentLocation);
     }
 
-    Parser::StateTransition Parser::tagAttribNameHandleChar(char c)
+    Parser::StateChange Parser::attrib_name(char c)
     {
-        if(isValidNameCharacter(c))
+        if(isValidNameChar(c))
         {
+            // build attrib name
             m_currentAttribName.push_back(c);
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_ATTRIB_NAME);
+
+            return StateChange{ CharOp::CONSUME, State::ATTRIB_NAME };
         }
 
-        if(std::isspace(c) || c == '=')
-        {
-            return StateTransition(CharacterOperation::RECYCLE_CHAR, Parser::State::TAG_ATTRIB_EQUALS);
-        }
-
-        throw ParserError("unexpected characeter");
+        // if not a name expect whitespace or equals
+        return StateChange{ CharOp::DEFER, State::ATTRIB_EQUALS };
     }
 
-    Parser::StateTransition Parser::tagAttribEqualsHandleChar(char c)
+    Parser::StateChange Parser::attrib_equals(char c)
     {
-        if(std::isspace(c))
+        if(isWhitespace(c))
         {
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_ATTRIB_EQUALS);
+            return StateChange{ CharOp::CONSUME, State::ATTRIB_EQUALS };
         }
 
-        if(c == '=' && !m_equalsSeen)
+        if(c == ATTRIB_EQUALS)
         {
-            m_equalsSeen = true;
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_ATTRIB_EQUALS);
-        }
-
-        if(c == '"' && m_equalsSeen)
-        {
-            m_equalsSeen = false;
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_ATTRIB_VALUE);
-        }
-        else if(c == '"')
-        {
-            throw ParserError("equals not seen");
-        }
-
-        if(m_equalsSeen)
-        {
-            throw ParserError("multiple equals after attrib");
+            return StateChange{ CharOp::CONSUME, State::ATTRIB_EQUALS_SEEN };
         }
         
-        throw ParserError("unexpected characeter");
+        throw ParserError(std::string("expected \"=\" got unexpected character: \"") + c + "\"", 
+            m_currentLocation);
     }
 
-    Parser::StateTransition Parser::tagAttribValueHandleChar(char c)
+    Parser::StateChange Parser::attrib_equals_seen(char c)
     {
-        if(c == '"')
-        {   
+        if(isWhitespace(c))
+        {
+            return StateChange{ CharOp::CONSUME, State::ATTRIB_EQUALS_SEEN };
+        }
+
+        if(c == ATTRIB_VALUE_WRAP)
+        {
+            return StateChange{ CharOp::CONSUME, State::ATTRIB_VALUE };
+        }
+        
+        throw ParserError(std::string("expected '\"' got unexpected character: \"") + c + "\"", 
+            m_currentLocation);
+    }
+
+    Parser::StateChange Parser::attrib_value(char c)
+    {
+        if(c == ATTRIB_VALUE_WRAP)
+        {
+            // add value and key to attrib map
             m_nodeStack.top().attributes[m_currentAttribName] = m_currentAttribValue;
+            
             m_currentAttribName.clear();
             m_currentAttribValue.clear();
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_WHITESPACE);
+            
+            return StateChange{ CharOp::CONSUME, State::WHITESPACE };
         }
 
+        // build value
         m_currentAttribValue.push_back(c);
 
-        return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_ATTRIB_VALUE);
+        return StateChange{ CharOp::CONSUME, State::ATTRIB_VALUE };
     }
 
-    Parser::StateTransition Parser::tagCloseHandleChar(char c)
+    Parser::StateChange Parser::close_name(char c)
     {
-        if(isValidNameCharacter(c))
+        if(isValidNameChar(c))
         {
+            // build close tag name
             m_nodeStack.top().tagName.push_back(c);
 
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::TAG_CLOSE_NAME);
+            return StateChange{ CharOp::CONSUME, State::CLOSE_NAME };
         }
 
-        if(c == '>')
+        if(c == TAG_END)
         {
+            // check that the close tag actually terminates a currently open tag
             Node closeTag = std::move(m_nodeStack.top());
             m_nodeStack.pop();
 
-            if(m_nodeStack.top().tagName != closeTag.tagName)
+            if(closeTag.tagName != m_nodeStack.top().tagName)
             {
-                std::cout << closeTag.tagName << std::endl;
-
-                while(!m_nodeStack.empty())
-                {
-                    std::cout << m_nodeStack.top().tagName << std::endl;
-                    m_nodeStack.pop();
-                }
-
-                throw ParserError("unclosed tag");
+                throw ParserError("expected close tag with tag name: \"" + m_nodeStack.top().tagName + "\" got: \"" + closeTag.tagName + "\"", 
+                    m_currentLocation);
             }
 
+            if(!m_nodeStack.empty())
+            {
+                stripNode(m_nodeStack.top());
+            }
+
+            // if the close tag matched the node at the top of the stack
             if(m_nodeStack.size() > 1)
             {
-                Node tag = std::move(m_nodeStack.top());
-                
-                if(!tag.children.empty() && !tag.content.empty())
-                {
-                    tag.content.clear();
-                }
-                else
-                {
-                    stripForContent(tag.content);
-                }
-            
+                Node tagToClose = std::move(m_nodeStack.top());
                 m_nodeStack.pop();
-                m_nodeStack.top().children.push_back(std::move(tag));
+
+                m_nodeStack.top().children.emplace_back(std::move(tagToClose));
+            }
+            else
+            {
+                m_rootClosed = true;
             }
 
-            return StateTransition(CharacterOperation::CONSUME_CHAR, Parser::State::NULL_STATE);
+            return StateChange{ CharOp::CONSUME, State::START };
         }
 
-        throw ParserError("unexpected characeter");
+        throw ParserError(std::string("expected '>' got unexpected character: \"") + c + "\"", 
+            m_currentLocation);
+    }
+
+    Parser::StateChange Parser::singleton(char c)
+    {
+        if(c == TAG_END)
+        {
+            Node singletonTag = std::move(m_nodeStack.top());
+            m_nodeStack.pop();
+            m_nodeStack.top().children.emplace_back(std::move(singletonTag));
+
+            return StateChange{ CharOp::CONSUME, State::START };
+        }
+
+        throw ParserError(std::string("expected '>' after '/' to close singleton tag, got unexpected character: \"") + c + "\"", 
+            m_currentLocation);
     }
 
     void Parser::handleChar(char c)
@@ -239,43 +295,70 @@ namespace sml
         while(!characterConsumed)
         {
             // invoke the current state
-            Parser::StateTransition handleResult{ CharacterOperation::CONSUME_CHAR, State::NULL_STATE };
+            Parser::StateChange handleResult{ CharOp::CONSUME, State::START };
             switch (m_currentState)
             {
-            case State::NULL_STATE:
-                handleResult = nullStateHandleChar(c);
-                break;
-            case State::NAME_STATE:
-                handleResult = nameStateHandleChar(c);
-                break;
-            case State::TAG_WHITESPACE:
-                handleResult = tagWhitespaceStateHandleChar(c);
-                break;
-            case State::TAG_ATTRIB_NAME:
-                handleResult = tagAttribNameHandleChar(c);
-                break;
-            case State::TAG_ATTRIB_EQUALS:
-                handleResult = tagAttribEqualsHandleChar(c);
-                break;
-            case State::TAG_ATTRIB_VALUE:
-                handleResult = tagAttribValueHandleChar(c);
-                break;
-            case State::TAG_CLOSE_NAME:
-                handleResult = tagCloseHandleChar(c);
-                break;
+            case State::START:
+                handleResult = start(c);
+                break; 
+            case State::NAME:
+                handleResult = name(c);
+                break; 
+            case State::WHITESPACE:
+                handleResult = whitespace(c);
+                break; 
+            case State::ATTRIB_NAME:
+                handleResult = attrib_name(c);
+                break; 
+            case State::ATTRIB_EQUALS:
+                handleResult = attrib_equals(c);
+                break; 
+            case State::ATTRIB_EQUALS_SEEN:
+                handleResult = attrib_equals_seen(c);
+                break; 
+            case State::ATTRIB_VALUE:
+                handleResult = attrib_value(c);
+                break; 
+            case State::CLOSE_NAME:
+                handleResult = close_name(c);
+                break; 
+            case State::SINGLETON:
+                handleResult = singleton(c);
+                break; 
             default:
-                throw std::logic_error("unknown state");
-                break;
+                throw std::logic_error("parser in malformed state");
             }
 
-            characterConsumed = (handleResult.charOp == CharacterOperation::CONSUME_CHAR);
-            m_currentState = handleResult.newState;
+            characterConsumed = false;
+
+            switch (handleResult.op)
+            {
+            case CharOp::CONSUME:
+                characterConsumed = true;
+            case CharOp::DEFER:
+                break;
+            default:
+                throw std::logic_error("unkown char operation");
+            }
+
+            m_currentState = handleResult.nextState;
+        }
+
+        // handle location
+        if (c == '\n')
+        {
+            m_currentLocation.column = 1;
+            m_currentLocation.line++;
+        }
+        else
+        {
+            m_currentLocation.column++;
         }
     }
 
     void Parser::reset()
     {
-        m_currentState = State::NULL_STATE;
+        m_currentState = State::START;
 
         while(!m_nodeStack.empty())
         {
@@ -287,18 +370,27 @@ namespace sml
 
         m_equalsSeen = false;
         m_terminalTag = false;
+        m_rootClosed = false;
+
+        m_currentLocation.column = 1;
+        m_currentLocation.line = 1;
     }
 
     Node Parser::finish()
     {
-        if(m_currentState != State::NULL_STATE)
+        if(m_currentState != State::START)
         {
-            throw ParserError("unexpected eof");
+            throw ParserError("unexpected eof", m_currentLocation);
         }
 
         if(m_nodeStack.empty())
         {
-            throw ParserError("no root node found!");
+            throw ParserError("no root node found!", m_currentLocation);
+        }
+
+        if(m_nodeStack.size() > 1 || !m_rootClosed)
+        {
+            throw ParserError("unclosed tag: \"" + m_nodeStack.top().tagName + "\"", m_nodeStack.top().location);
         }
 
         Node root = std::move(m_nodeStack.top());
@@ -312,7 +404,7 @@ namespace sml
     std::istream& operator>>(std::istream& str, sml::Node& node)
     {
         sml::Parser p;
-        
+
         char character;
         while(str.get(character))
         {
@@ -346,10 +438,10 @@ namespace sml
     {
         struct Tag
         {
-            const Node* node;
+            const Node& node;
             bool expanded;
 
-            Tag(const Node* n, bool exp = false) : node(n), expanded(exp)
+            Tag(const Node& n, bool exp = false) : node(n), expanded(exp)
             {
             }
         };
@@ -357,7 +449,7 @@ namespace sml
         std::stack<Tag> expandStack; 
         std::size_t depth = 0;
 
-        expandStack.push(Tag{ &node });
+        expandStack.push(Tag{ node });
 
         while(!expandStack.empty())
         {
@@ -369,15 +461,15 @@ namespace sml
                 std::fill_n(std::ostream_iterator<char>(output), depth, '\t');
 
                 // print attributes
-                output << "<" << tagToExpand.node->tagName;
+                output << "<" << tagToExpand.node.tagName;
 
-                for(const auto& keyValue : tagToExpand.node->attributes)
+                for(const auto& keyValue : tagToExpand.node.attributes)
                 {
                     output << " " << keyValue.first << "=\"" << keyValue.second << "\"";
                 }
 
                 // create short tag if it has no children
-                if(tagToExpand.node->children.empty() && tagToExpand.node->content.empty())
+                if(tagToExpand.node.children.empty() && tagToExpand.node.content.empty())
                 {
                     expandStack.pop();
                     
@@ -387,22 +479,22 @@ namespace sml
                 {
                     // expand children
                     std::for_each(
-                        tagToExpand.node->children.rbegin(),
-                        tagToExpand.node->children.rend(),
-                        [&expandStack](const auto& child){ expandStack.push(Tag{ &child }); });
+                        tagToExpand.node.children.rbegin(),
+                        tagToExpand.node.children.rend(),
+                        [&expandStack](const auto& child){ expandStack.push(Tag{ child }); });
                     
                     depth++;
                     tagToExpand.expanded = true;
 
                     output << ">";
 
-                    if(tagToExpand.node->content.empty())
+                    if(tagToExpand.node.content.empty())
                     {
                         output << "\n";
                     }
 
                     // print content
-                    output << tagToExpand.node->content;
+                    output << tagToExpand.node.content;
                 }
             }
             else
@@ -412,12 +504,12 @@ namespace sml
                 {
                     depth--;
 
-                    if(!expandStack.top().node->children.empty())
+                    if(!expandStack.top().node.children.empty())
                     {
                         std::fill_n(std::ostream_iterator<char>(output), depth, '\t');
                     }
 
-                    output << "</" << expandStack.top().node->tagName << ">" << std::endl;
+                    output << "</" << expandStack.top().node.tagName << ">" << std::endl;
                     expandStack.pop();
                 }
             }
