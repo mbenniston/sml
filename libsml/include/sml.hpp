@@ -32,7 +32,7 @@ namespace sml
         std::map<std::string, std::string> attributes;
 
         std::size_t contentOffset; // location with the parents tags content
-        Location location; // location from the source stream
+        Location location;         // location from the source stream
     };
 
     /**
@@ -43,8 +43,7 @@ namespace sml
     public:
         Location location;
 
-        ParserError(const std::string& msg, const Location& loc) : 
-            std::runtime_error("Parser error: " + msg + " at " + std::to_string(loc.line) + ":"  + std::to_string(loc.column)), location(loc)
+        ParserError(const std::string &msg, const Location &loc) : std::runtime_error("Parser error: " + msg + " at " + std::to_string(loc.line) + ":" + std::to_string(loc.column)), location(loc)
         {
         }
     };
@@ -56,16 +55,16 @@ namespace sml
     {
     private:
         enum class State
-        { 
-            START, // state before parsing a tag
-            NAME, // tag name
-            WHITESPACE, // seperators between attribs
-            ATTRIB_NAME, // attrib=
-            ATTRIB_EQUALS, // before equals
+        {
+            START,              // state before parsing a tag
+            NAME,               // tag name
+            WHITESPACE,         // seperators between attribs
+            ATTRIB_NAME,        // attrib=
+            ATTRIB_EQUALS,      // before equals
             ATTRIB_EQUALS_SEEN, // after equals
-            ATTRIB_VALUE, // "value"
-            CLOSE_NAME, // close tag
-            SINGLETON // open tag closed with prefixed '/'
+            ATTRIB_VALUE,       // "value"
+            CLOSE_NAME,         // close tag
+            SINGLETON           // open tag closed with prefixed '/'
         };
 
         enum class CharOp
@@ -101,7 +100,7 @@ namespace sml
 
         State m_currentState = State::START;
 
-        Location m_currentLocation = Location{ 1, 1 };
+        Location m_currentLocation = Location{1, 1};
 
     public:
         /**
@@ -115,7 +114,7 @@ namespace sml
          * @param c character to handle
          */
         void handleChar(char c);
-        
+
         /**
          * @brief Finializes the construction of the node tree and resets the builder
          * 
@@ -124,8 +123,8 @@ namespace sml
         Node finish();
     };
 
-    std::istream& operator>>(std::istream& str, sml::Node& node);
-    std::ostream& operator<<(std::ostream& str, sml::Node& node);
+    std::istream &operator>>(std::istream &str, sml::Node &node);
+    std::ostream &operator<<(std::ostream &str, const sml::Node &node);
 
     /**
      * @brief Parses sml from a given iterator range 
@@ -135,11 +134,12 @@ namespace sml
      * @param end The ending iterator
      * @return Node The node built from parsing the iterator range 
      */
-    template<typename IteratorType>
+    template <typename IteratorType>
     static Node parse(IteratorType begin, IteratorType end)
     {
         Parser p;
-        std::for_each(begin, end, [&p](const auto& c){ p.handleChar(c); });
+        std::for_each(begin, end, [&p](const auto &c)
+                      { p.handleChar(c); });
         return p.finish();
     }
 
@@ -149,7 +149,7 @@ namespace sml
      * @param str The string to be interpreted as sml
      * @return Node The node built from parsing the string
      */
-    Node parse(const std::string& str);
+    Node parse(const std::string &str);
 
     /**
      * @brief Parses sml from a given input stream 
@@ -157,7 +157,7 @@ namespace sml
      * @param str The input stream to be interpreted as sml
      * @return Node The node built from parsing the string
      */
-    Node parse(std::istream& str);
+    Node parse(std::istream &str);
 
     /**
      * @brief Writes out a sml node to a given output stream
@@ -165,7 +165,7 @@ namespace sml
      * @param node The node to be serialised
      * @param output The output stream to be used
      */
-    void write(const Node& node, std::ostream& output);
+    void write(const Node &node, std::ostream &output);
 
     /**
      * @brief Writes out a sml node to a given output string
@@ -173,5 +173,5 @@ namespace sml
      * @param node The node to be serialised
      * @param output The string to be outputed
      */
-    void write(const Node& node, std::string& output);
+    void write(const Node &node, std::string &output);
 }
