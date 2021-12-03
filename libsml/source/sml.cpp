@@ -41,12 +41,12 @@ namespace sml
         }
     }
 
-    static constexpr bool isValidNameChar(char c)
+    static bool isValidNameChar(char c)
     {
         return !std::isspace(c) && c != '<' && c != '>' && c != '=' && c != '/';
     }
 
-    static constexpr bool isWhitespace(char c)
+    static bool isWhitespace(char c)
     {
         return std::isspace(c);
     }
